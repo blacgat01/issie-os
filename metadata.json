@@ -1,0 +1,9 @@
+{
+  "name": "issie os ",
+  "description": "A real-time voice translator that listens to your speech and speaks the translation in your chosen language, powered by Gemini.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "geolocation"
+  ]
+}
