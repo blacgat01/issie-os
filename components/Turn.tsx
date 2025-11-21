@@ -3,6 +3,7 @@ import React from 'react';
 import { AppState, TranscriptTurn } from '../types';
 import { LoadingSpinner, WrenchScrewdriverIcon } from './icons';
 import SimpleChart from './SimpleChart';
+import ToolOutputViewer from './ToolOutputViewer';
 
 interface TurnProps {
     turn: TranscriptTurn;
@@ -17,6 +18,9 @@ export const Turn: React.FC<TurnProps> = ({ turn, toolCallStatus }) => {
             </div>
         );
     }
+    
+    // Check if assistant content is JSON (structured tool output)
+    const isJson = turn.assistant.trim().startsWith('{') && turn.assistant.trim().endsWith('}');
 
     return (
         <div className="space-y-4">
@@ -45,7 +49,12 @@ export const Turn: React.FC<TurnProps> = ({ turn, toolCallStatus }) => {
                         </div>
                     ) : (
                          <div>
-                            {turn.assistant && <p className="whitespace-pre-wrap mb-2">{turn.assistant}</p>}
+                            {isJson ? (
+                                <ToolOutputViewer jsonContent={turn.assistant} />
+                            ) : (
+                                turn.assistant && <p className="whitespace-pre-wrap mb-2">{turn.assistant}</p>
+                            )}
+                            
                             {turn.chartData && <SimpleChart data={turn.chartData} />}
                             {!turn.assistant && !turn.chartData && <span className="italic">...</span>}
                          </div>

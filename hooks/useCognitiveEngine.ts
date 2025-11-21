@@ -1,27 +1,38 @@
 
-import { useRef, useCallback, useEffect } from 'react';
+import React, { useRef, useCallback, useEffect, useState } from 'react';
 import { useAppContext } from '../store/AppContext';
 import { LiveSessionManager } from '../services/LiveSessionManager';
 import { getRealNetworkStatus } from '../lib/resourceManager';
 import { extractSemanticMemory } from '../memory/semantic';
 import { ConversationSession, DocumentData, StartSessionConfig } from '../types';
+import { secureStorage } from '../lib/security';
+import { createVirtualFileSystem } from '../lib/virtualFileSystem';
 
 export const useCognitiveEngine = () => {
     const { state, dispatch } = useAppContext();
     const {
         sourceLanguage, targetLanguage, voice, volume, isVisionEnabled,
         semanticMemory, networkStatus, documentContent, conversationHistory,
-        transcriptHistory, isListening, userFaceDescription, isScreenSharing
+        transcriptHistory, isListening, userFaceDescription, isScreenSharing, missionTasks, isCoachingMode, isStealthMode
     } = state;
 
     const sessionManagerRef = useRef<LiveSessionManager | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    
+    // Ref for the legacy file input fallback
+    const legacyInputRef = useRef<HTMLInputElement>(null);
+    
+    const [isScreenShareSupported, setIsScreenShareSupported] = useState(false);
 
     // Initialize the session manager once
     useEffect(() => {
         if (!sessionManagerRef.current) {
             sessionManagerRef.current = new LiveSessionManager({ dispatch });
+        }
+        // Check for screen share support - STRICT CHECK for mobile compatibility
+        if (typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
+            setIsScreenShareSupported(true);
         }
     }, [dispatch]);
 
@@ -47,10 +58,10 @@ export const useCognitiveEngine = () => {
         const options = {
             sourceLanguage, targetLanguage, voice, isVisionEnabled,
             semanticMemory, networkStatus, documentContent, volume,
-            userFaceDescription // Pass security description
+            userFaceDescription, missionTasks, isCoachingMode, isStealthMode
         };
         await sessionManagerRef.current?.start(config, options, videoRef, canvasRef);
-    }, [sourceLanguage, targetLanguage, voice, isVisionEnabled, semanticMemory, networkStatus, documentContent, volume, userFaceDescription]);
+    }, [sourceLanguage, targetLanguage, voice, isVisionEnabled, semanticMemory, networkStatus, documentContent, volume, userFaceDescription, missionTasks, isCoachingMode, isStealthMode]);
 
     const stopSession = useCallback(async (saveHistory = true) => {
         await sessionManagerRef.current?.stop(saveHistory);
@@ -64,12 +75,11 @@ export const useCognitiveEngine = () => {
             };
             const updatedHistory = [newSession, ...conversationHistory];
             const newMemory = await extractSemanticMemory(transcriptHistory);
+            
+            // Dispatch updates state and triggers reducer side-effects for persistence
             dispatch({ type: 'SESSION_STOPPED', payload: { newHistory: updatedHistory, newMemory } });
-            localStorage.setItem('translationHistory', JSON.stringify(updatedHistory));
-            if (newMemory) {
-                 localStorage.setItem('semanticMemory', JSON.stringify(newMemory));
-            }
-        } else if (isListening) { // Only dispatch cleanup if it was actually listening
+            
+        } else if (isListening) { 
              dispatch({ type: 'SESSION_CLEANUP' });
         }
     }, [conversationHistory, transcriptHistory, dispatch, isListening]);
@@ -80,6 +90,12 @@ export const useCognitiveEngine = () => {
     
     const handleToggleScreenShare = useCallback(async () => {
         if (!isListening || !videoRef.current) return;
+
+        // Check if screen sharing is supported (often missing on mobile)
+        if (!isScreenShareSupported) {
+            dispatch({ type: 'SET_ERROR', payload: "Screen sharing is not supported on this device." });
+            return;
+        }
 
         try {
             if (isScreenSharing) {
@@ -118,7 +134,7 @@ export const useCognitiveEngine = () => {
             dispatch({ type: 'SET_UI_STATE', payload: { isScreenSharing: false } });
         }
 
-    }, [isListening, isScreenSharing, dispatch]);
+    }, [isListening, isScreenSharing, dispatch, isScreenShareSupported]);
 
 
     const handleFileUpload = (content: string, filename: string) => {
@@ -147,54 +163,78 @@ export const useCognitiveEngine = () => {
         }
     };
     
+    const handleLegacyFolderLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            try {
+                const virtualHandle = createVirtualFileSystem(e.target.files);
+                sessionManagerRef.current?.setDirectoryHandle(virtualHandle);
+                dispatch({ type: 'SET_PROJECT_NAME', payload: virtualHandle.name });
+                dispatch({ type: 'SET_ERROR', payload: null });
+            } catch (err) {
+                console.error("Failed to create virtual file system", err);
+                dispatch({ type: 'SET_ERROR', payload: "Failed to parse folder structure." });
+            }
+        }
+    };
+
     const handleLoadProject = useCallback(async () => {
         try {
+            // Check if API is supported
+            if (!('showDirectoryPicker' in window)) {
+                 throw new Error("FileSystemAccessAPINotSupported");
+            }
+            
             // @ts-ignore - showDirectoryPicker is not yet in standard lib dom types for all envs
             const handle = await window.showDirectoryPicker();
             sessionManagerRef.current?.setDirectoryHandle(handle);
             dispatch({ type: 'SET_PROJECT_NAME', payload: handle.name });
             dispatch({ type: 'SET_ERROR', payload: null });
         } catch (e: any) {
-            if (e.name !== 'AbortError') {
-                console.error("Project load failed:", e);
+            if (e.name === 'AbortError') return; // User cancelled
+
+            console.error("Project load failed (Native API):", e);
+            
+            // If blocked (e.g. iframe), fall back to legacy input
+            if (e.message?.includes('Cross origin sub frames') || e.name === 'SecurityError' || e.message === 'FileSystemAccessAPINotSupported') {
+                console.log("Falling back to legacy input mechanism...");
+                // Trigger the hidden legacy input
+                if (legacyInputRef.current) {
+                    legacyInputRef.current.click();
+                } else {
+                     dispatch({ type: 'SET_ERROR', payload: "File System Access blocked and fallback unavailable." });
+                }
+            } else {
                 dispatch({ type: 'SET_ERROR', payload: "Failed to load project directory." });
             }
         }
     }, [dispatch]);
     
     const handleClearHistory = useCallback(() => {
-        dispatch({ type: 'CLEAR_ALL_HISTORY' });
-        localStorage.removeItem('translationHistory');
-        localStorage.removeItem('semanticMemory');
+        if (window.confirm("Are you sure you want to delete all conversation history? This action cannot be undone.")) {
+            dispatch({ type: 'CLEAR_ALL_HISTORY' });
+            secureStorage.removeItem('translationHistory');
+            secureStorage.removeItem('semanticMemory');
+            secureStorage.removeItem('missionTasks');
+        }
     }, [dispatch]);
     
     // Volume control effect
     useEffect(() => {
         sessionManagerRef.current?.setVolume(volume);
     }, [volume]);
-    
-    // Load history from storage on mount
-    useEffect(() => {
-         try {
-            const savedEpisodic = localStorage.getItem('translationHistory');
-            if (savedEpisodic) dispatch({ type: 'SET_CONVERSATION_HISTORY', payload: JSON.parse(savedEpisodic) });
-            const savedSemantic = localStorage.getItem('semanticMemory');
-            if (savedSemantic) dispatch({ type: 'SET_SEMANTIC_MEMORY', payload: JSON.parse(savedSemantic) });
-            const savedFace = localStorage.getItem('userFaceDescription');
-            if (savedFace) dispatch({ type: 'SET_USER_FACE_DESCRIPTION', payload: savedFace });
-        } catch (e) { console.error("Failed to load history from localStorage", e); }
-    }, [dispatch]);
-
 
     return {
         videoRef,
         canvasRef,
+        legacyInputRef,
         startSession,
         stopSession,
         sendTextMessage,
         handleFileUpload,
         handleClearHistory,
         handleToggleScreenShare, 
-        handleLoadProject, // Exported
+        handleLoadProject,
+        handleLegacyFolderLoad,
+        isScreenShareSupported,
     };
 };

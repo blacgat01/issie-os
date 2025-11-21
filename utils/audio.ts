@@ -1,5 +1,5 @@
 
-import { Blob } from '@google/genai';
+import { Blob as GenAIBlob } from '@google/genai';
 
 // Base64 decoding
 export function decode(base64: string): Uint8Array {
@@ -60,7 +60,7 @@ export function encode(bytes: Uint8Array): string {
 }
 
 // Create a Blob object compatible with the Gemini API from raw audio data
-export function createBlob(data: Float32Array): Blob {
+export function createBlob(data: Float32Array, sampleRate: number = 16000): GenAIBlob {
     const l = data.length;
     const int16 = new Int16Array(l);
     for (let i = 0; i < l; i++) {
@@ -68,7 +68,7 @@ export function createBlob(data: Float32Array): Blob {
     }
     return {
         data: encode(new Uint8Array(int16.buffer)),
-        mimeType: 'audio/pcm;rate=16000',
+        mimeType: `audio/pcm;rate=${sampleRate}`,
     };
 }
 

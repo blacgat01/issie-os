@@ -1,6 +1,7 @@
 
 // FIX: Import React to resolve 'Cannot find namespace React' error for the React.Dispatch type.
 import React from 'react';
+import { WalletState } from './lib/financial/wallet'; // Import Wallet Types
 
 export interface ChartData {
   type: 'bar' | 'line' | 'pie';
@@ -31,8 +32,22 @@ export interface SemanticMemory {
   userPreferences: string[];
 }
 
+export interface MissionTask {
+  id: string;
+  description: string;
+  status: 'pending' | 'in-progress' | 'completed';
+  createdAt: string;
+}
+
+export interface CoachingTip {
+  text: string;
+  severity: 'neutral' | 'warning' | 'critical';
+  timestamp: number;
+}
+
 export type NetworkStatus = 'Optimal' | 'Degraded' | 'Poor';
 export type SecurityStatus = 'open' | 'locked' | 'unlocked';
+export type MotionStatus = 'Stationary' | 'Moving' | 'Active';
 
 export interface StreamConfig {
   video: {
@@ -56,6 +71,13 @@ export interface StartSessionConfig {
   resumedTurns?: TranscriptTurn[];
 }
 
+export interface Notification {
+    id: string;
+    message: string;
+    type: 'success' | 'error' | 'info' | 'warning';
+    duration?: number;
+}
+
 // --- Central State Management Types ---
 
 export interface AppState {
@@ -69,6 +91,8 @@ export interface AppState {
   isDocsOpen: boolean; 
   cameraFacingMode: 'user' | 'environment';
   textInput: string;
+  isCoachingMode: boolean; // New: Real-time coaching toggle
+  isStealthMode: boolean; // New: Tactical Night Mode
   
   // Session State
   isListening: boolean;
@@ -84,6 +108,8 @@ export interface AppState {
   conversationHistory: ConversationSession[];
   currentEmotion: string | null;
   semanticMemory: SemanticMemory | null;
+  missionTasks: MissionTask[]; // New Goal Tracking
+  latestCoachingTip: CoachingTip | null; // New: Visual Whisper
   documentContent: DocumentData | null;
   documentName: string | null;
   projectName: string | null; // Added for Local File System
@@ -95,6 +121,18 @@ export interface AppState {
   interruptedSession: TranscriptTurn[] | null;
   securityStatus: SecurityStatus;
   userFaceDescription: string | null;
+  userVoiceReference: string | null; // Base64 encoded audio reference
+  motionStatus: MotionStatus; // New Sensor Fusion
+  deviceHeading: number | null; // New: Magnetometer / Compass Heading (0-360)
+  lightLevel: number | null; // New: Ambient Light (Lux)
+  notification: Notification | null; // New: Global Toast System
+
+  // Financial State (Paper Trading)
+  paperWallet: WalletState | null;
+
+  // DevOps / CI/CD State
+  githubToken: string | null;
+  githubRepo: string | null; // format: "username/repo"
 
   // Grounding & Location
   userLocation: { latitude: number; longitude: number; } | null;
@@ -121,13 +159,23 @@ export type Action =
   | { type: 'SET_NETWORK_STATUS'; payload: NetworkStatus }
   | { type: 'SET_IS_ONLINE'; payload: boolean }
   | { type: 'SET_DOCUMENT'; payload: { content: DocumentData | null; name: string | null; } }
-  | { type: 'SET_PROJECT_NAME'; payload: string | null } // New Action
+  | { type: 'SET_PROJECT_NAME'; payload: string | null }
   | { type: 'SET_TOOL_CALL'; payload: { name: string; args: any } | null }
   | { type: 'UPDATE_SEMANTIC_MEMORY'; payload: { newPreference: string } }
   | { type: 'SET_USER_LOCATION'; payload: { latitude: number; longitude: number; } | null }
   | { type: 'SET_GROUNDING_CHUNKS'; payload: any[] | null }
   | { type: 'SET_SECURITY_STATUS'; payload: SecurityStatus }
-  | { type: 'SET_USER_FACE_DESCRIPTION'; payload: string | null };
+  | { type: 'SET_USER_FACE_DESCRIPTION'; payload: string | null }
+  | { type: 'SET_USER_VOICE_REFERENCE'; payload: string | null }
+  | { type: 'UPDATE_MISSION_TASKS'; payload: MissionTask[] }
+  | { type: 'SET_MOTION_STATUS'; payload: MotionStatus }
+  | { type: 'SET_DEVICE_HEADING'; payload: number | null }
+  | { type: 'SET_LIGHT_LEVEL'; payload: number | null }
+  | { type: 'SET_COACHING_TIP'; payload: CoachingTip | null }
+  | { type: 'SET_GITHUB_CONFIG'; payload: { token: string | null; repo: string | null } }
+  | { type: 'SET_PAPER_WALLET'; payload: WalletState }
+  | { type: 'SHOW_NOTIFICATION'; payload: Notification }
+  | { type: 'HIDE_NOTIFICATION' };
 
 export interface AppContextType {
   state: AppState;

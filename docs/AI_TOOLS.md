@@ -1,34 +1,50 @@
-# AI & Tooling Documentation
 
-## Gemini Configuration
+# Issie OS: Skill Modules & Agents
 
-**Models Used:**
-- **`gemini-2.5-flash-native-audio-preview-09-2025`**: Used for the main live conversation loop. Optimized for low latency and audio modalities.
-- **`gemini-2.5-flash`**: Used for one-shot tasks like Face Registration and Semantic Memory extraction.
+Issie runs multiple "Skill Modules" that behave like internal mini-agents. These are defined in `lib/ToolDeclarations.ts`.
 
-**System Prompts (`lib/systemInstructions.ts`):**
-The system prompt is dynamic and re-assembled for every session. It includes:
-1. **Core Identity**: "Issie", the executive assistant and partner.
-2. **Security Protocol**: Instructions on how to handle the "Locked" state and when to verify identity.
-3. **Context**: Current location, resumed conversation transcript, and semantic memory summaries.
-4. **Capabilities**: Explicit instructions on when to use specific tools.
+## 🧠 The Analyst / Engineer Agent
+*Deep reasoning, code manipulation, and local file intelligence.*
+- **`readProjectFile`**: Reads code or text from the mounted local directory.
+- **`listDirectory`**: Maps the structure of your local project.
+- **`queryDocument`**: Performs semantic search (RAG) on loaded CSV/TXT files.
+- **`saveToDisk`**: Writes code, notes, or data to a file. (Direct write on Desktop, Download on Mobile).
+- **`patchFile`**: Surgically modifies source code files (Self-Evolution).
+- **`captureScreen`**: Takes a visual snapshot of the current view.
+- **`copyToClipboard`**: Manipulates the system clipboard.
 
-## Available Tools
+## 💸 The Trader Agent
+*Financial intelligence and market awareness.*
+- **`getCryptoTechnicalAnalysis`**: Detailed technical breakdown (SMA, Volume, Price) of any major cryptocurrency.
+- **`generateChart`**: Visualizes data trends dynamically in the UI.
 
-Defined in `lib/ToolDeclarations.ts` and executed in `lib/ToolExecutor.ts`.
+## 🌐 The Navigator Agent
+*World interaction and logistics.*
+- **`openUrl`**: Opens browser tabs to specific resources.
+- **`getWeatherForecast`**: Uses geolocation to check environmental conditions.
+- **`scheduleMeeting`**: Generates `.ics` calendar files for instant scheduling.
+- **`getBatteryStatus`**: Monitors device power levels.
 
-| Tool Name | Description | Implementation |
-|-----------|-------------|----------------|
-| **`displayEmotionAndRespond`** | Updates the UI emotion meter and provides an empathetic response. | Internal State Update |
-| **`confirmBiometricIdentity`** | Unlocks/Locks the application based on visual match. | Internal State Update |
-| **`searchWeb`** | Queries Wikipedia for general information. | External API (Wikipedia) |
-| **`getCryptoTechnicalAnalysis`** | Fetches Price, Volume, and calculates SMAs for crypto. | External API (CryptoCompare) |
-| **`scheduleMeeting`** | Schedules events. | Mock Backend (simulated success) |
-| **`checkInventory`** | Checks SKU availability. | Mock Data |
-| **`queryDocument`** | RAG implementation: searches uploaded documents using cosine similarity. | Local Logic |
-| **`updateSemanticMemory`** | Saves user preferences to long-term memory. | Internal State Update |
-| **`generateCreativeConcept`** | Generates story ideas using `gemini-2.5-pro`. | AI-on-AI Call |
+## 🎬 The Director Agent
+*Creative vision and persona.*
+- **`generateCreativeConcept`**: Develops loglines, synopses, and themes for narrative work.
+- **`playAmbientAudio`**: Controls the acoustic environment (Focus Mode / Brown Noise).
+- **`displayEmotionAndRespond`**: Empathetic mirroring of the user's state.
 
-## Security & Privacy
-- **Biometrics**: No images are stored permanently. Only a text description is saved locally.
-- **API Keys**: Keys are used client-side. In a production environment, tool execution should be proxied through a secure backend.
+## 🛡️ The Sentinel (Security)
+*Biometric Access Control & System Health.*
+- **`confirmBiometricIdentity`**: Visual verification of the user against the stored semantic description.
+- **`getSystemStatus`**: Reports on network, security, and motion sensor status.
+
+## 🚀 The Commander (Mission Control)
+*Goal tracking and executive function.*
+- **`manageMission`**: Adds, updates, or completes tasks in the persistent Mission Log.
+
+## 🎓 The Coach Agent
+*Real-time social dynamics and communication advice.*
+- **`provideCoachingTip`**: Delivers silent, tactical advice to the HUD during a conversation.
+
+## ⚙️ The System Agent
+*OS Maintenance.*
+- **`createSystemSnapshot`**: Encrypts and downloads the full OS state.
+- **`restoreSystemSnapshot`**: Information on how to restore from backup.

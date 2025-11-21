@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { NetworkStatus } from '../types';
 import { WifiIcon, WifiSignalMediumIcon, WifiSignalLowIcon } from './icons';
@@ -42,9 +43,9 @@ const NetworkStatusIndicator: React.FC<NetworkStatusIndicatorProps> = ({ status 
   const { Icon, color, label } = getDisplay(status);
 
   return (
-    <div className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-sm font-medium border transition-all duration-300 ease-in-out ${color}`} title={`Network Status: ${label}`}>
+    <div className={`flex items-center space-x-2 px-2 sm:px-3 py-1.5 rounded-full text-sm font-medium border transition-all duration-300 ease-in-out ${color}`} title={`Network Status: ${label}`}>
       <Icon className="w-4 h-4" />
-      <span>{label}</span>
+      <span className="hidden sm:inline">{label}</span>
     </div>
   );
 };

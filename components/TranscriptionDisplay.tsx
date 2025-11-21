@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect } from 'react';
 import { AppState, TranscriptTurn } from '../types';
 import { Turn } from './Turn';
@@ -14,10 +15,10 @@ const TranscriptionDisplay: React.FC<TranscriptionDisplayProps> = ({ history, cu
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && isOverlay) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [history, currentUserTranscript, currentAssistantTranscript]);
+  }, [history, currentUserTranscript, currentAssistantTranscript, isOverlay]);
 
   const turnsContent = (
     <>
@@ -46,8 +47,9 @@ const TranscriptionDisplay: React.FC<TranscriptionDisplayProps> = ({ history, cu
     );
   }
 
+  // Standard mode: Flexible container to grow with content
   return (
-    <div ref={scrollRef} className="flex-1 w-full overflow-y-auto p-4 space-y-6 bg-gray-900/50 rounded-lg border border-gray-700">
+    <div className="w-full p-4 space-y-6 bg-gray-900/50 rounded-lg border border-gray-700">
       {turnsContent}
     </div>
   );

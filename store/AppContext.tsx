@@ -1,7 +1,10 @@
 
-import React, { createContext, useReducer, useContext, ReactNode } from 'react';
-import { AppState, Action, AppContextType, SemanticMemory } from '../types';
+import React, { createContext, useReducer, useContext, ReactNode, useEffect, useState } from 'react';
+import { AppState, Action, AppContextType, SemanticMemory, MissionTask } from '../types';
+import { secureStorage, initializeSecurity } from '../lib/security';
+import { getWallet } from '../lib/financial/wallet';
 
+// We now need to handle async storage loading
 const initialState: AppState = {
     sourceLanguage: 'auto',
     targetLanguage: 'en-US',
@@ -10,12 +13,14 @@ const initialState: AppState = {
     isVisionEnabled: true,
     isHistoryOpen: false,
     isDocsOpen: false,
+    isCoachingMode: false,
+    isStealthMode: false,
     cameraFacingMode: 'user',
     textInput: '',
     isListening: false,
     isConnecting: false,
     isFlippingCamera: false,
-    isScreenSharing: false, // Initialize screen sharing state
+    isScreenSharing: false,
     error: null,
     userTranscript: '',
     assistantTranscript: '',
@@ -23,9 +28,11 @@ const initialState: AppState = {
     conversationHistory: [],
     currentEmotion: null,
     semanticMemory: null,
+    missionTasks: [],
+    latestCoachingTip: null,
     documentContent: null,
     documentName: null,
-    projectName: null, // Added
+    projectName: null,
     networkStatus: 'Optimal',
     isOnline: true,
     interruptedSession: null,
@@ -34,6 +41,14 @@ const initialState: AppState = {
     groundingChunks: null,
     securityStatus: 'open',
     userFaceDescription: null,
+    userVoiceReference: null,
+    motionStatus: 'Stationary',
+    deviceHeading: null,
+    lightLevel: null,
+    notification: null,
+    githubToken: null,
+    githubRepo: null,
+    paperWallet: null,
 };
 
 const appReducer = (state: AppState, action: Action): AppState => {
@@ -43,7 +58,6 @@ const appReducer = (state: AppState, action: Action): AppState => {
         case 'START_CONNECTING':
             return { ...state, isConnecting: true, error: null };
         case 'SESSION_STARTED':
-            // Reset to locked state if a face is registered
             return { 
                 ...state, 
                 isConnecting: false, 
@@ -52,13 +66,15 @@ const appReducer = (state: AppState, action: Action): AppState => {
                 userTranscript: '', 
                 assistantTranscript: '',
                 isScreenSharing: false,
-                securityStatus: state.userFaceDescription ? 'locked' : 'open'
+                securityStatus: (state.userFaceDescription || state.userVoiceReference) ? 'locked' : 'open'
             };
         case 'SESSION_STOPPED':
-            // Persist updated memory to localStorage
             if (action.payload.newMemory) {
-                localStorage.setItem('semanticMemory', JSON.stringify(action.payload.newMemory));
+                secureStorage.setItem('semanticMemory', action.payload.newMemory);
             }
+            // Auto-save encrypted history for persistence
+            secureStorage.setItem('translationHistory', action.payload.newHistory);
+            
             return {
                 ...state,
                 isListening: false,
@@ -66,13 +82,14 @@ const appReducer = (state: AppState, action: Action): AppState => {
                 isScreenSharing: false,
                 conversationHistory: action.payload.newHistory,
                 semanticMemory: action.payload.newMemory ?? state.semanticMemory,
-                securityStatus: state.userFaceDescription ? 'locked' : 'open' // Reset security on stop
+                securityStatus: (state.userFaceDescription || state.userVoiceReference) ? 'locked' : 'open',
+                latestCoachingTip: null
             };
         case 'SESSION_CLEANUP':
              return { 
                 ...state, 
                 isListening: false, 
-                isConnecting: false,
+                isConnecting: false, 
                 isScreenSharing: false,
                 userTranscript: '', 
                 assistantTranscript: '', 
@@ -80,7 +97,8 @@ const appReducer = (state: AppState, action: Action): AppState => {
                 error: null, 
                 toolCallStatus: null, 
                 groundingChunks: null,
-                securityStatus: state.userFaceDescription ? 'locked' : 'open'
+                securityStatus: (state.userFaceDescription || state.userVoiceReference) ? 'locked' : 'open',
+                latestCoachingTip: null
             };
         case 'SET_ERROR':
             return { ...state, error: action.payload, isConnecting: false, isListening: false, isScreenSharing: false };
@@ -110,7 +128,7 @@ const appReducer = (state: AppState, action: Action): AppState => {
         case 'SET_SEMANTIC_MEMORY':
             return { ...state, semanticMemory: action.payload };
         case 'CLEAR_ALL_HISTORY':
-            return { ...state, conversationHistory: [], semanticMemory: null };
+            return { ...state, conversationHistory: [], semanticMemory: null, missionTasks: [] };
         case 'SET_INTERRUPTED_SESSION':
             return { ...state, interruptedSession: action.payload };
         case 'SET_NETWORK_STATUS':
@@ -127,7 +145,7 @@ const appReducer = (state: AppState, action: Action): AppState => {
             const updatedMemory: SemanticMemory = state.semanticMemory 
                 ? { ...state.semanticMemory, userPreferences: [...state.semanticMemory.userPreferences, action.payload.newPreference] }
                 : { summary: '', keyEntities: [], userPreferences: [action.payload.newPreference] };
-            localStorage.setItem('semanticMemory', JSON.stringify(updatedMemory));
+            secureStorage.setItem('semanticMemory', updatedMemory);
             return { ...state, semanticMemory: updatedMemory };
         }
         case 'SET_USER_LOCATION':
@@ -138,15 +156,48 @@ const appReducer = (state: AppState, action: Action): AppState => {
             return { ...state, securityStatus: action.payload };
         case 'SET_USER_FACE_DESCRIPTION':
             if (action.payload === null) {
-                localStorage.removeItem('userFaceDescription');
+                secureStorage.removeItem('userFaceDescription');
             } else {
-                localStorage.setItem('userFaceDescription', action.payload);
+                secureStorage.setItem('userFaceDescription', action.payload);
             }
             return { 
                 ...state, 
                 userFaceDescription: action.payload,
-                securityStatus: action.payload ? 'locked' : 'open' 
+                securityStatus: action.payload || state.userVoiceReference ? 'locked' : 'open' 
             };
+        case 'SET_USER_VOICE_REFERENCE':
+            if (action.payload === null) {
+                secureStorage.removeItem('userVoiceReference');
+            } else {
+                secureStorage.setItem('userVoiceReference', action.payload);
+            }
+            return {
+                ...state,
+                userVoiceReference: action.payload,
+                securityStatus: action.payload || state.userFaceDescription ? 'locked' : 'open'
+            };
+        case 'UPDATE_MISSION_TASKS':
+            secureStorage.setItem('missionTasks', action.payload);
+            return { ...state, missionTasks: action.payload };
+        case 'SET_MOTION_STATUS':
+            return { ...state, motionStatus: action.payload };
+        case 'SET_DEVICE_HEADING':
+            return { ...state, deviceHeading: action.payload };
+        case 'SET_LIGHT_LEVEL':
+            const isDark = action.payload !== null && action.payload < 10;
+            return { ...state, lightLevel: action.payload, isStealthMode: isDark };
+        case 'SET_COACHING_TIP':
+            return { ...state, latestCoachingTip: action.payload };
+        case 'SET_GITHUB_CONFIG':
+            if (action.payload.token) secureStorage.setItem('githubToken', action.payload.token);
+            if (action.payload.repo) secureStorage.setItem('githubRepo', action.payload.repo);
+            return { ...state, githubToken: action.payload.token, githubRepo: action.payload.repo };
+        case 'SET_PAPER_WALLET':
+             return { ...state, paperWallet: action.payload };
+        case 'SHOW_NOTIFICATION':
+             return { ...state, notification: action.payload };
+        case 'HIDE_NOTIFICATION':
+             return { ...state, notification: null };
         default:
             return state;
     }
@@ -156,6 +207,39 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [state, dispatch] = useReducer(appReducer, initialState);
+    const [isLoaded, setIsLoaded] = useState(false);
+
+    // Async Initialization for Secure Storage
+    useEffect(() => {
+        const init = async () => {
+            await initializeSecurity();
+            
+            const savedFace = await secureStorage.getItem('userFaceDescription');
+            const savedVoice = await secureStorage.getItem('userVoiceReference');
+            const savedEpisodic = await secureStorage.getItem('translationHistory');
+            const savedSemantic = await secureStorage.getItem('semanticMemory');
+            const savedTasks = await secureStorage.getItem('missionTasks');
+            const savedGhToken = await secureStorage.getItem('githubToken');
+            const savedGhRepo = await secureStorage.getItem('githubRepo');
+            const wallet = await getWallet();
+
+            if (savedFace) dispatch({ type: 'SET_USER_FACE_DESCRIPTION', payload: savedFace });
+            if (savedVoice) dispatch({ type: 'SET_USER_VOICE_REFERENCE', payload: savedVoice });
+            if (savedEpisodic) dispatch({ type: 'SET_CONVERSATION_HISTORY', payload: savedEpisodic });
+            if (savedSemantic) dispatch({ type: 'SET_SEMANTIC_MEMORY', payload: savedSemantic });
+            if (savedTasks) dispatch({ type: 'UPDATE_MISSION_TASKS', payload: savedTasks });
+            if (savedGhToken || savedGhRepo) dispatch({ type: 'SET_GITHUB_CONFIG', payload: { token: savedGhToken, repo: savedGhRepo } });
+            if (wallet) dispatch({ type: 'SET_PAPER_WALLET', payload: wallet });
+
+            setIsLoaded(true);
+        };
+        init();
+    }, []);
+
+    if (!isLoaded) {
+        return <div className="h-screen w-full flex items-center justify-center bg-gray-900 text-blue-400">Initializing Secure Sovereign Kernel...</div>;
+    }
+
     return (
         <AppContext.Provider value={{ state, dispatch }}>
             {children}

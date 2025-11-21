@@ -1,321 +1,626 @@
 
-import { DocumentData } from "../types";
-import { GoogleGenAI } from "@google/genai";
-import * as apiClient from './apiClient'; // Import the new API client
+import { DocumentData, SecurityStatus } from "../types";
+import { GoogleGenAI, FunctionCall } from "@google/genai";
+import { logAuditEntry } from './security';
+import { TraderAgent, EngineerAgent, NavigatorAgent, SentinelAgent, DirectorAgent, SystemAgent, CoachAgent, AgentContext } from './agents';
+import { calculateRSI, calculateMACD, calculateBollingerBands } from './financial/indicators';
+import { executePaperTrade, getWallet } from './financial/wallet';
+import { getFearAndGreedIndex } from './financial/sentiment';
+import { calculateRisk } from './financial/risk';
+import { runBacktest } from './financial/backtest';
+import { getPublicWalletBalance } from './financial/blockchain';
+import { getGasPrice, getDexQuote, analyzeTokenSecurity } from './financial/defi';
 
-interface FunctionCall {
-  name: string;
-  args: Record<string, any>;
-}
+// Re-export AgentContext for other files using it
+export type { AgentContext };
 
 // --- Helper Functions ---
-
-// Helper to calculate Simple Moving Average
-const calculateSMA = (data: number[], period: number): number | null => {
-    if (!data || data.length < period) return null;
-    const periodData = data.slice(-period);
-    const sum = periodData.reduce((acc, val) => acc + val, 0);
-    return sum / period;
+const getCryptoSymbol = (input: string): string => {
+    const map: Record<string, string> = {
+        'bitcoin': 'BTC', 'ethereum': 'ETH', 'solana': 'SOL', 'cardano': 'ADA', 'ripple': 'XRP'
+    };
+    return map[input.toLowerCase().trim()] || input.toUpperCase();
 };
 
-// Helper to parse the Wikipedia API response
-const parseWikipediaResponse = (data: any): string => {
-    if (data.query && data.query.search && data.query.search.length > 0) {
-        const firstResult = data.query.search[0];
-        const snippet = firstResult.snippet.replace(/<[^>]*>/g, '');
-        return `According to Wikipedia's article on "${firstResult.title}", ${snippet}...`;
-    }
-    return "I couldn't find a relevant summary for that query on Wikipedia.";
-};
-
-// --- Tool Execution Logic ---
-
-// 1. Bitcoin Price Lookup (Specific)
-const executeBitcoinPriceLookup = async (): Promise<{ result: string } | null> => {
-    try {
-        const url = `https://blockchain.info/ticker`;
-        const response = await fetch(url);
-        if (!response.ok) return null; 
-        const data = await response.json();
-        const price = data.USD?.last;
-        if (price) {
-            const formattedPrice = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(price);
-            return { result: `The current price of Bitcoin is ${formattedPrice}.` };
-        }
-        return null;
-    } catch (error) {
-        console.error("Bitcoin price lookup failed:", error);
-        return null;
-    }
-};
-
-// 2. Crypto Technical Analysis (Generalized)
-const executeCryptoTechnicalAnalysis = async (cryptocurrency: string): Promise<{ result: string }> => {
-    const cryptoSymbol = cryptocurrency.toUpperCase();
-    const cryptoName = cryptocurrency.charAt(0).toUpperCase() + cryptocurrency.slice(1);
-    console.log(`Attempting to perform technical analysis for ${cryptoName} (${cryptoSymbol}).`);
-
-    try {
-        const historyUrl = `https://min-api.cryptocompare.com/data/v2/histoday?fsym=${cryptoSymbol}&tsym=USD&limit=30`;
-        const historyResponse = await fetch(historyUrl);
-        if (!historyResponse.ok) throw new Error(`Failed to fetch historical data for ${cryptoName}`);
-        const historyData = await historyResponse.json();
-        if (historyData.Response === 'Error') throw new Error(historyData.Message);
-        const closingPrices = historyData.Data.Data.map((d: { close: number }) => d.close);
-        
-        const sma7 = calculateSMA(closingPrices, 7);
-        const sma30 = calculateSMA(closingPrices, 30);
-
-        const currentUrl = `https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${cryptoSymbol}&tsyms=USD`;
-        const currentResponse = await fetch(currentUrl);
-        if (!currentResponse.ok) throw new Error(`Failed to fetch current market data for ${cryptoName}`);
-        const currentData = await currentResponse.json();
-
-        const cryptoData = currentData.RAW?.[cryptoSymbol]?.USD;
-        if (!cryptoData) throw new Error(`No market data found for ${cryptoName}. Please check if it's a valid cryptocurrency symbol.`);
-        
-        const formatCurrency = (val: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
-        
-        let resultString = `Here is a summary of technical indicators for ${cryptoName}:\n`;
-        resultString += `- Current Price: ${formatCurrency(cryptoData.PRICE)}\n`;
-        resultString += `- 24-Hour Change: ${cryptoData.CHANGEPCT24HOUR.toFixed(2)}%\n`;
-        resultString += `- 24-Hour Volume: ${formatCurrency(cryptoData.VOLUME24HOUR)}\n`;
-        if (sma7) resultString += `- 7-Day SMA: ${formatCurrency(sma7)}\n`;
-        if (sma30) resultString += `- 30-Day SMA: ${formatCurrency(sma30)}`;
-
-        let interpretation = '';
-        const currentPrice = cryptoData.PRICE;
-        if (sma7 && sma30) {
-            interpretation += '\n\n**Data Interpretation:**\n';
-            if (currentPrice > sma7) {
-                interpretation += '- The current price is trading above its 7-day average, which can be interpreted as a short-term bullish signal.\n';
-            } else {
-                interpretation += '- The current price is trading below its 7-day average, which can be interpreted as a short-term bearish signal.\n';
-            }
-            if (currentPrice > sma30) {
-                interpretation += '- The price is also trading above its 30-day average, suggesting a positive medium-term trend.';
-            } else {
-                interpretation += '- The price is also trading below its 30-day average, suggesting a negative medium-term trend.';
-            }
-        }
-        resultString += interpretation;
-
-        return { result: resultString };
-    } catch (error: any) {
-        console.error(`${cryptoName} technical analysis failed:`, error);
-        return { result: `I was unable to retrieve the data needed to perform a technical analysis for ${cryptoName}. Reason: ${error.message}` };
-    }
-};
-
-// 3. Web Search (General)
-const executeSearchWeb = async (query: string): Promise<{ result: string }> => {
-    if (!navigator.onLine) {
-        return { result: "I can't perform a web search right now as I appear to be offline." };
-    }
-    console.log(`EXECUTING WEB SEARCH FOR: "${query}"`);
-
-    const cryptoQueryRegex = /(?:price of|current price of|what's the price of|price for)\s+(bitcoin|btc)/i;
-    if (cryptoQueryRegex.test(query)) {
-        const priceResult = await executeBitcoinPriceLookup();
-        if (priceResult) return priceResult;
-    }
-
-    try {
-        const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`;
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Wikipedia API request failed with status ${response.status}`);
-        const data = await response.json();
-        return { result: parseWikipediaResponse(data) };
-    } catch (error: any) {
-        console.error("Web search failed:", error);
-        return { result: `Error performing web search: ${error.message}` };
-    }
-};
-
-// 4. Inventory Check (Mock)
-const executeCheckInventory = async (sku: string): Promise<{ status: string, stock: number }> => {
-    console.log(`EXECUTING INVENTORY LOOKUP FOR SKU: "${sku}"`);
-    return sku === 'GEM-001' ? { status: 'In Stock', stock: 152 } : { status: 'Out of Stock', stock: 0 };
-};
-
-// 5. Generate Alert (Mock)
-const executeGenerateAlert = async (summary: string, level: string): Promise<{ result: string }> => {
-    console.log(`[ACTION] ALERT GENERATED: Level ${level} - ${summary}`);
-    return { result: `Successfully created a ${level} priority alert: "${summary}"` };
-};
-
-// 6. Document Query (RAG with Semantic Search)
-const processText = (text: string): Map<string, number> => {
-    const wordCounts = new Map<string, number>();
-    const tokens = text.toLowerCase().match(/\b\w+\b/g) || [];
-    tokens.forEach(token => wordCounts.set(token, (wordCounts.get(token) || 0) + 1));
-    return wordCounts;
-};
-
-const calculateCosineSimilarity = (vecA: Map<string, number>, vecB: Map<string, number>): number => {
-    let dotProduct = 0, magA = 0, magB = 0;
-    const allKeys = new Set([...vecA.keys(), ...vecB.keys()]);
-    allKeys.forEach(key => dotProduct += (vecA.get(key) || 0) * (vecB.get(key) || 0));
-    vecA.forEach(val => magA += val * val);
-    vecB.forEach(val => magB += val * val);
-    magA = Math.sqrt(magA);
-    magB = Math.sqrt(magB);
-    return (magA === 0 || magB === 0) ? 0 : dotProduct / (magA * magB);
-};
-
-const executeQueryDocument = async (query: string, document: DocumentData | null): Promise<{ result: string }> => {
-    console.log(`EXECUTING DOCUMENT QUERY: "${query}"`);
-    if (!document) {
-        return { result: "No document is loaded. Please upload a document first." };
-    }
+// --- HAPTIC FEEDBACK ENGINE ---
+const triggerHaptic = (type: 'SUCCESS' | 'FAILURE' | 'WARN' | 'SCAN' | 'CRITICAL') => {
+    if (!navigator.vibrate) return;
     
-    const queryVector = processText(query);
-    const scoredRows = document.rows.map((row) => {
-        const rowVector = processText(row.join(' '));
-        return { row, similarity: calculateCosineSimilarity(queryVector, rowVector) };
-    }).filter(item => item.similarity > 0.1);
-
-    scoredRows.sort((a, b) => b.similarity - a.similarity);
-
-    if (scoredRows.length === 0) {
-        return { result: "I could not find any information matching that query in the document." };
+    switch (type) {
+        case 'SUCCESS':
+            navigator.vibrate(50); 
+            break;
+        case 'FAILURE':
+            navigator.vibrate([50, 100, 50]); 
+            break;
+        case 'WARN':
+            navigator.vibrate(200); 
+            break;
+        case 'SCAN':
+            navigator.vibrate(20); 
+            break;
+        case 'CRITICAL':
+            navigator.vibrate([100, 50, 100, 50, 100]); 
+            break;
     }
-    
-    const topResults = scoredRows.slice(0, 3).map(item => 
-        document.headers.map((header, i) => `${header}: ${item.row[i]}`).join(', ')
-    ).join('\n---\n');
-
-    return { result: `Based on your query, here are the most relevant results from the document:\n${topResults}` };
 };
 
-// 7. Generate Creative Concept (Agentic)
-const executeGenerateCreativeConcept = async (coreIdea: string): Promise<{ result: string }> => {
-    console.log(`EXECUTING CREATIVE CONCEPT GENERATION FOR: "${coreIdea}"`);
-    const prompt = `
-    You are a world-class creative strategist and story developer. Your user, Gabe, is a builder of cinematic, gritty, and grounded narratives.
-    His creative signature involves high-stakes finance, urban drama, AI power structures, and hidden economies.
 
-    He has provided a core idea. Your task is to expand this into a structured creative concept. The tone should be professional, sharp, and aligned with his style.
+// --- File System Helpers ---
 
-    Core Idea: "${coreIdea}"
-
-    Generate the following, formatted as clear markdown:
-    - **Logline:** A compelling one-sentence summary.
-    - **Synopsis:** A short paragraph (3-5 sentences) outlining the plot.
-    - **Key Themes:** 3-4 core themes the story explores (e.g., "Ambition vs. Morality", "Humanity in a Tech-Driven World").
-    - **Target Audience:** A brief description of the ideal viewer.
-    `;
+const getFileHandle = async (handle: any, path: string, create = false) => {
+    const parts = path.split(/[/\\]/).filter(p => p && p !== '.');
+    let currentHandle = handle;
     
+    for (let i = 0; i < parts.length - 1; i++) {
+        currentHandle = await currentHandle.getDirectoryHandle(parts[i], { create });
+    }
+    return await currentHandle.getFileHandle(parts[parts.length - 1], { create });
+};
+
+const readLocalFile = async (handle: any, path: string): Promise<string> => {
     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-pro', // Use a powerful model for creative tasks
-            contents: prompt,
-        });
-        
-        const text = response.text;
-        return { result: text };
-    } catch (error: any) {
-        console.error("Creative concept generation failed:", error);
-        return { result: `I encountered an error while trying to develop that concept: ${error.message}` };
-    }
-};
-
-// 8. Generate Chart (Visualization)
-const executeGenerateChart = async (title: string, type: string, data: any[]): Promise<{ result: string }> => {
-    return { result: `Chart "${title}" generated successfully for the user.` };
-};
-
-// 9. File System: List Directory
-const executeListDirectory = async (subPath: string | undefined, directoryHandle: any): Promise<{ result: string }> => {
-    if (!directoryHandle) {
-        return { result: "No project directory is currently open. Ask the user to load a project first." };
-    }
-    
-    try {
-        let targetHandle = directoryHandle;
-        
-        // Simple path traversal logic (shallow for now, or assumes subPath is a direct child name for simplicity)
-        // For a real deep traversal, we'd need a recursive finder.
-        // We will just list the root or the immediate child if specified.
-        if (subPath) {
-             try {
-                 targetHandle = await directoryHandle.getDirectoryHandle(subPath);
-             } catch (e) {
-                 return { result: `Directory '${subPath}' not found in the root.` };
-             }
-        }
-
-        const entries = [];
-        for await (const entry of targetHandle.values()) {
-            entries.push(entry.kind === 'directory' ? `[DIR] ${entry.name}` : `[FILE] ${entry.name}`);
-        }
-        return { result: `Contents of ${subPath || 'root'}:\n${entries.join('\n')}` };
-    } catch (error: any) {
-        return { result: `Failed to list directory: ${error.message}` };
-    }
-};
-
-// 10. File System: Read File
-const executeReadProjectFile = async (filePath: string, directoryHandle: any): Promise<{ result: string }> => {
-    if (!directoryHandle) {
-        return { result: "No project directory is currently open." };
-    }
-    
-    try {
-        // Split path by '/' to traverse
-        const parts = filePath.split('/');
-        const fileName = parts.pop()!;
-        let currentHandle = directoryHandle;
-
-        for (const part of parts) {
-            currentHandle = await currentHandle.getDirectoryHandle(part);
-        }
-        
-        const fileHandle = await currentHandle.getFileHandle(fileName);
+        const fileHandle = await getFileHandle(handle, path);
         const file = await fileHandle.getFile();
-        const content = await file.text();
-        
-        // Truncate massive files to prevent token overflow
-        const truncated = content.length > 20000 ? content.substring(0, 20000) + "\n...[File truncated]" : content;
-        
-        return { result: `Content of ${filePath}:\n\`\`\`\n${truncated}\n\`\`\`` };
-    } catch (error: any) {
-        return { result: `Failed to read file '${filePath}': ${error.message}` };
+        return await file.text();
+    } catch (e: any) {
+        throw new Error(`Could not read file '${path}': ${e.message}`);
     }
 };
 
+const writeLocalFile = async (handle: any, path: string, content: string): Promise<void> => {
+    try {
+        const fileHandle = await getFileHandle(handle, path, true); 
+        // @ts-ignore 
+        const writable = await fileHandle.createWritable();
+        await writable.write(content);
+        await writable.close();
+    } catch (e: any) {
+         if (e.message === 'VIRTUAL_FS_WRITE_NOT_SUPPORTED' || e.name === 'TypeError') {
+             throw new Error('VIRTUAL_FS_WRITE_NOT_SUPPORTED');
+         }
+         throw new Error(`Could not write to file '${path}'. Error: ${e.message}`);
+    }
+};
 
-// --- Main Tool Router ---
+const listLocalDirectory = async (handle: any, subPath: string = ''): Promise<string> => {
+    try {
+        let targetHandle = handle;
+        if (subPath) {
+            const parts = subPath.split(/[/\\]/).filter(p => p && p !== '.');
+            for (const part of parts) {
+                targetHandle = await targetHandle.getDirectoryHandle(part);
+            }
+        }
+
+        let output = `Directory Listing for '/${subPath}':\n`;
+        // @ts-ignore 
+        for await (const [name, entry] of targetHandle.entries()) {
+            output += `${entry.kind === 'directory' ? '📁' : '📄'} ${name}\n`;
+        }
+        return output;
+    } catch (e: any) {
+        return `Error listing directory '${subPath}': ${e.message}`;
+    }
+};
+
+// --- Helper: Generate ICS File ---
+const generateICS = (title: string, time: string) => {
+    let dateStart = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+    try {
+        const parsed = new Date(time);
+        if (!isNaN(parsed.getTime())) {
+            dateStart = parsed.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+        }
+    } catch(e) {}
+    
+    return `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//IssieOS//SovereignCalendar//EN
+BEGIN:VEVENT
+UID:${Date.now()}@issie.os
+DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'}
+DTSTART:${dateStart}
+SUMMARY:${title}
+DESCRIPTION:Scheduled by Issie OS.
+END:VEVENT
+END:VCALENDAR`;
+};
+
+
+// --- Orchestration & Execution Logic ---
+
+// 1. Trader Agent Execution
+const executeTraderTask = async (task: string, args: any, context: AgentContext): Promise<string> => {
+    const cryptoSymbol = args.cryptocurrency || args.symbol ? getCryptoSymbol(args.cryptocurrency || args.symbol) : 'BTC';
+    
+    if (task === 'getCryptoTechnicalAnalysis') {
+        // Basic price check
+        try {
+             const currentUrl = `https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${cryptoSymbol}&tsyms=USD`;
+             const currentData = await (await fetch(currentUrl)).json();
+             const price = currentData.RAW?.[cryptoSymbol]?.USD?.PRICE;
+             return `[TRADER] Price for ${cryptoSymbol}: $${price}. For deep analysis, use getQuantMetrics.`;
+        } catch (e: any) {
+             return `[TRADER] Failed to access market feed: ${e.message}`;
+        }
+    }
+
+    if (task === 'getQuantMetrics') {
+        // Advanced Math with Multi-Timeframe Analysis
+        try {
+            // Use timeframes array if provided, else default to 1h
+            const timeframes = args.timeframes || ['1h'];
+            const results: any = { symbol: cryptoSymbol, price: 0 };
+            
+            for (const tf of timeframes) {
+                let limit = 100;
+                let endpoint = 'histohour';
+                if (tf === '1d') endpoint = 'histoday';
+                if (tf === '15m') endpoint = 'histominute'; 
+                
+                const historyUrl = `https://min-api.cryptocompare.com/data/v2/${endpoint}?fsym=${cryptoSymbol}&tsym=USD&limit=${limit}`;
+                const historyData = await (await fetch(historyUrl)).json();
+                
+                if (historyData.Response === 'Error') continue;
+    
+                const candles = historyData.Data.Data;
+                const closes = candles.map((d: any) => d.close);
+                const currentPrice = closes[closes.length - 1];
+                results.price = currentPrice; // Update latest price
+    
+                const rsi = calculateRSI(closes);
+                const bands = calculateBollingerBands(closes);
+                const macd = calculateMACD(closes);
+    
+                let signal = "NEUTRAL";
+                if (rsi && rsi < 30) signal = "BULLISH (Oversold)";
+                if (rsi && rsi > 70) signal = "BEARISH (Overbought)";
+                
+                results[tf] = {
+                    RSI: rsi?.toFixed(2),
+                    MACD: macd ? { macd: macd.macd.toFixed(2), signal: macd.signal.toFixed(2), hist: macd.histogram.toFixed(4) } : null,
+                    Bollinger: bands ? { upper: bands.upper.toFixed(2), lower: bands.lower.toFixed(2) } : null,
+                    Signal: signal
+                };
+            }
+            
+            return JSON.stringify(results);
+
+        } catch (e: any) {
+            return `[TRADER] Quant calculation failed: ${e.message}`;
+        }
+    }
+    
+    if (task === 'getMarketSentiment') {
+        const sentiment = await getFearAndGreedIndex();
+        if (!sentiment) return "[TRADER] Could not fetch Sentiment data.";
+        return JSON.stringify(sentiment);
+    }
+    
+    if (task === 'calculateRisk') {
+        try {
+            const wallet = await getWallet();
+            const riskData = calculateRisk(
+                wallet.balance,
+                args.riskPercentage || 1,
+                args.entryPrice,
+                args.stopLossPrice,
+                args.takeProfitPrice
+            );
+            return JSON.stringify(riskData);
+        } catch (e: any) {
+            return `[TRADER] Risk Calc Failed: ${e.message}`;
+        }
+    }
+    
+    if (task === 'runBacktest') {
+        const result = await runBacktest(cryptoSymbol, args.timeframe || '1h');
+        return typeof result === 'string' ? result : JSON.stringify(result);
+    }
+
+    if (task === 'checkPublicWallet') {
+        const result = await getPublicWalletBalance(args.chain, args.address);
+        return typeof result === 'string' ? result : JSON.stringify(result);
+    }
+
+    if (task === 'checkArbitrage') {
+        try {
+            const exchanges = ['Binance', 'Coinbase', 'Kraken', 'Bitfinex'];
+            const prices: { exchange: string, price: number }[] = [];
+
+            await Promise.all(exchanges.map(async (ex) => {
+                try {
+                    const url = `https://min-api.cryptocompare.com/data/price?fsym=${cryptoSymbol}&tsyms=USD&e=${ex}`;
+                    const data = await (await fetch(url)).json();
+                    if (data.USD) {
+                        prices.push({ exchange: ex, price: data.USD });
+                    }
+                } catch (e) {}
+            }));
+
+            if (prices.length < 2) return "[TRADER] Insufficient data for arbitrage calculation.";
+
+            prices.sort((a, b) => a.price - b.price);
+            const min = prices[0];
+            const max = prices[prices.length - 1];
+            const diff = max.price - min.price;
+            const spread = ((diff / min.price) * 100).toFixed(3);
+
+            return JSON.stringify({
+                asset: cryptoSymbol,
+                spreadPercent: spread,
+                buyAt: { exchange: min.exchange, price: min.price },
+                sellAt: { exchange: max.exchange, price: max.price },
+                opportunity: parseFloat(spread) > 0.5 ? "YES" : "NO"
+            });
+
+        } catch (e: any) {
+            return `[TRADER] Arbitrage check failed: ${e.message}`;
+        }
+    }
+
+    if (task === 'executePaperTrade') {
+        try {
+            // Need current price for execution
+            const currentUrl = `https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${cryptoSymbol}&tsyms=USD`;
+            const currentData = await (await fetch(currentUrl)).json();
+            const price = currentData.RAW?.[cryptoSymbol]?.USD?.PRICE;
+            
+            if (!price) throw new Error("Price unavailable");
+
+            const result = await executePaperTrade(
+                cryptoSymbol, 
+                args.side, 
+                price, 
+                args.amountUSD,
+                args.stopLoss,
+                args.takeProfit
+            );
+            
+            // Update context hook for UI
+            if (context.clientHooks.refreshWallet) {
+                const wallet = await getWallet();
+                context.clientHooks.refreshWallet(wallet);
+            }
+            
+            return JSON.stringify(result);
+        } catch (e: any) {
+            return `[TRADER] Trade Execution Failed: ${e.message}`;
+        }
+    }
+    
+    // --- NEW DEFI TOOLS ---
+    if (task === 'getGasPrice') {
+        return await getGasPrice(args.chain);
+    }
+    
+    if (task === 'getDexQuote') {
+        return await getDexQuote(args.inputToken, args.outputToken, args.amount);
+    }
+    
+    if (task === 'analyzeTokenSecurity') {
+        return await analyzeTokenSecurity(args.tokenAddress, args.chain);
+    }
+
+    return `[TRADER] Unknown task`;
+};
+
+// 2. Navigator Agent Execution
+const executeNavigatorTask = async (task: string, args: any): Promise<string> => {
+    if (task === 'webSearch') {
+        try {
+             const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(args.query)}&format=json&origin=*`;
+             const data = await (await fetch(url)).json();
+             return `[NAVIGATOR] Search Result: ${data.query.search[0]?.snippet || 'No data'}`;
+        } catch (e) { return `[NAVIGATOR] Connection failed.`; }
+    }
+    if (task === 'getWeatherForecast') {
+        try {
+             const url = `https://api.open-meteo.com/v1/forecast?latitude=${args.latitude}&longitude=${args.longitude}&current=temperature_2m,weather_code`;
+             const data = await (await fetch(url)).json();
+             return `[NAVIGATOR] Env Report: ${data.current.temperature_2m}°C`; 
+        } catch (e) { return `[NAVIGATOR] Sensor fail.`; }
+    }
+    return `[NAVIGATOR] Idle.`;
+};
+
+// 3. Engineer Agent Execution (File Ops)
+const executeEngineerTask = async (task: string, args: any, context: AgentContext): Promise<string> => {
+    if (task === 'listDirectory') {
+        if (!context.directoryHandle) return "[ENGINEER] Error: No file system mounted. Ask user to 'Mount Project'.";
+        return await listLocalDirectory(context.directoryHandle, args.subPath || '');
+    }
+    if (task === 'readProjectFile') {
+        if (!context.directoryHandle) return "[ENGINEER] Error: No file system mounted.";
+        try {
+            const content = await readLocalFile(context.directoryHandle, args.filePath);
+            return `[ENGINEER] Content of '${args.filePath}':\n\n${content.substring(0, 2000)}${content.length > 2000 ? '\n...(truncated)' : ''}`;
+        } catch (e: any) {
+            return `[ENGINEER] Read Error: ${e.message}`;
+        }
+    }
+    if (task === 'queryDocument') {
+        if (!context.documentContent) return "[ENGINEER] Error: No document loaded. Ask user to upload a file.";
+        const { headers, rows } = context.documentContent;
+        const query = args.query.toLowerCase();
+        const matches = rows.filter(row => row.some(cell => cell.toLowerCase().includes(query)));
+        
+        if (matches.length === 0) return `[ENGINEER] No matches found for '${args.query}' in document.`;
+        
+        const limit = 5;
+        const resultText = matches.slice(0, limit).map(row => row.join(' | ')).join('\n');
+        return `[ENGINEER] Found ${matches.length} matches. Top results:\nHeaders: ${headers.join(' | ')}\n${resultText}${matches.length > limit ? '\n...(more)' : ''}`;
+    }
+    
+    if (task === 'patchFile') {
+        if (!context.directoryHandle) return "[ENGINEER] Error: No file system mounted.";
+        try {
+            const originalContent = await readLocalFile(context.directoryHandle, args.filePath);
+            if (!originalContent.includes(args.searchString)) {
+                 return `[ENGINEER] Patch Failed: Search string not found in '${args.filePath}'.`;
+            }
+            const newContent = originalContent.replace(args.searchString, args.replaceString);
+            await writeLocalFile(context.directoryHandle, args.filePath, newContent);
+            return `[ENGINEER] Patch applied to '${args.filePath}' successfully.`;
+        } catch (e: any) {
+             if (e.message === 'VIRTUAL_FS_WRITE_NOT_SUPPORTED') {
+                  return `[ENGINEER] Cannot patch in mobile/virtual environment. Please use 'saveToDisk' to download the full updated file instead.`;
+             }
+             return `[ENGINEER] Patch Error: ${e.message}`;
+        }
+    }
+    
+    if (task === 'pushToGitHub') {
+        const { token, repo } = context.githubConfig || {};
+        if (!token || !repo) {
+            return "[ENGINEER] Error: GitHub credentials not configured in Settings.";
+        }
+        
+        try {
+            const { filePath, content, commitMessage } = args;
+            const apiUrl = `https://api.github.com/repos/${repo}/contents/${filePath}`;
+            
+            // Check sha
+            let sha: string | undefined;
+            const getRes = await fetch(apiUrl, {
+                headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+            });
+            
+            if (getRes.ok) {
+                const data = await getRes.json();
+                sha = data.sha;
+            }
+            
+            // Push
+            const putRes = await fetch(apiUrl, {
+                method: 'PUT',
+                headers: { 
+                    'Authorization': `Bearer ${token}`, 
+                    'Accept': 'application/vnd.github.v3+json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    message: commitMessage,
+                    content: btoa(content), 
+                    sha: sha
+                })
+            });
+            
+            if (!putRes.ok) {
+                const err = await putRes.json();
+                throw new Error(err.message);
+            }
+            
+            return `[ENGINEER] Successfully pushed '${filePath}' to ${repo}. CI/CD pipeline triggered.`;
+            
+        } catch (e: any) {
+            return `[ENGINEER] GitHub Push Failed: ${e.message}`;
+        }
+    }
+
+    return "[ENGINEER] Standby.";
+};
+
+// --- Main Router ---
+
 export const executeToolCall = async (
   functionCall: FunctionCall,
-  documentContent: DocumentData | null,
-  directoryHandle: any | null // FileSystemDirectoryHandle
+  context: AgentContext
 ): Promise<any> => {
-  const { name, args } = functionCall;
+  const { name, args: rawArgs } = functionCall;
+  const args = rawArgs as any;
 
-  switch (name) {
-    case 'searchWeb':
-      return await executeSearchWeb(args.query);
-    case 'getCryptoTechnicalAnalysis':
-      return await executeCryptoTechnicalAnalysis(args.cryptocurrency);
-    case 'generateCreativeConcept':
-      return await executeGenerateCreativeConcept(args.coreIdea);
-    case 'scheduleMeeting':
-        return await apiClient.scheduleMeetingOnBackend(args.title, args.time);
-    case 'checkInventory':
-      return await executeCheckInventory(args.sku);
-    case 'generateAlert':
-      return await executeGenerateAlert(args.alertSummary, args.alertLevel);
-    case 'queryDocument':
-      return await executeQueryDocument(args.query, documentContent);
-    case 'generateChart':
-      return await executeGenerateChart(args.title, args.type, args.data);
-    case 'listDirectory':
-      return await executeListDirectory(args.subPath, directoryHandle);
-    case 'readProjectFile':
-      return await executeReadProjectFile(args.filePath, directoryHandle);
-    default:
-      return { result: `Tool '${name}' executed.` };
+  let result = "";
+  let agentName = "SYSTEM";
+  let status: 'SUCCESS' | 'FAILURE' = 'SUCCESS';
+
+  try {
+      switch (name) {
+        // TRADER AGENT
+        case 'getCryptoTechnicalAnalysis':
+        case 'generateChart':
+        case 'getQuantMetrics':
+        case 'executePaperTrade':
+        case 'checkArbitrage':
+        case 'getMarketSentiment':
+        case 'calculateRisk':
+        case 'runBacktest':
+        case 'checkPublicWallet':
+        case 'getGasPrice':
+        case 'getDexQuote':
+        case 'analyzeTokenSecurity':
+            agentName = TraderAgent.name;
+            result = await executeTraderTask(name, args, context);
+            triggerHaptic('SUCCESS');
+            break;
+
+        // NAVIGATOR AGENT
+        case 'searchWeb':
+        case 'openUrl':
+        case 'getWeatherForecast':
+        case 'getBatteryStatus':
+        case 'scheduleMeeting':
+        case 'announceLocally':
+            agentName = NavigatorAgent.name;
+            triggerHaptic('SUCCESS');
+            if (name === 'openUrl') {
+                 window.open(args.url, '_blank');
+                 result = `[NAVIGATOR] Opened ${args.url}`;
+            } else if (name === 'getBatteryStatus') {
+                 // @ts-ignore
+                 const bat = await navigator.getBattery();
+                 result = `[NAVIGATOR] Power: ${Math.round(bat.level * 100)}%${bat.charging ? ' (Charging)' : ''}`;
+            } else if (name === 'scheduleMeeting') {
+                 const icsContent = generateICS(args.title, args.time);
+                 const blob = new Blob([icsContent], { type: 'text/calendar' });
+                 const url = URL.createObjectURL(blob);
+                 const link = document.createElement('a');
+                 link.href = url;
+                 link.download = `${args.title.replace(/\s+/g, '_')}.ics`;
+                 link.click();
+                 result = `[NAVIGATOR] Calendar event '${args.title}.ics' generated and downloaded.`;
+            } else if (name === 'announceLocally') {
+                 if ('speechSynthesis' in window) {
+                     const utterance = new SpeechSynthesisUtterance(args.message);
+                     window.speechSynthesis.speak(utterance);
+                     result = `[NAVIGATOR] Announced locally: "${args.message}"`;
+                 } else {
+                     result = `[NAVIGATOR] Error: TTS not supported on this device.`;
+                     status = 'FAILURE';
+                 }
+            } else {
+                result = await executeNavigatorTask(name, args);
+            }
+            break;
+
+        // ENGINEER AGENT
+        case 'captureScreen':
+        case 'copyToClipboard':
+        case 'saveToDisk':
+        case 'listDirectory':
+        case 'readProjectFile':
+        case 'queryDocument':
+        case 'patchFile':
+        case 'pushToGitHub': 
+        case 'readVisualCode': 
+            agentName = EngineerAgent.name;
+            triggerHaptic('SUCCESS');
+            if (name === 'captureScreen') {
+                result = await context.clientHooks.captureScreen(args.filename);
+            } else if (name === 'copyToClipboard') {
+                result = await context.clientHooks.copyToClipboard(args.content);
+            } else if (name === 'readVisualCode') {
+                triggerHaptic('SCAN');
+                const codes = await context.clientHooks.scanVisualCodes();
+                if (codes && codes.length > 0) {
+                    result = `[ENGINEER] Scanned Data: ${codes.join(', ')}`;
+                } else {
+                    result = `[ENGINEER] No QR/Barcodes detected in view.`;
+                    status = 'FAILURE';
+                }
+            } else if (name === 'saveToDisk') {
+                let savedToDisk = false;
+                if (context.directoryHandle) {
+                    try {
+                        await writeLocalFile(context.directoryHandle, args.filename, args.content);
+                        result = `[ENGINEER] File '${args.filename}' written directly to mounted file system.`;
+                        savedToDisk = true;
+                    } catch (e: any) {
+                        if (e.message !== 'VIRTUAL_FS_WRITE_NOT_SUPPORTED') {
+                             status = 'FAILURE';
+                             result = `[ENGINEER] Write Failed: ${e.message}.`;
+                        }
+                    }
+                } 
+                
+                if (!savedToDisk) {
+                    const blob = new Blob([args.content], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url; link.download = args.filename; link.click();
+                    result = `[ENGINEER] File '${args.filename}' downloaded to device (Mobile/Virtual Mode).`;
+                }
+            } else {
+                result = await executeEngineerTask(name, args, context);
+            }
+            break;
+
+        // DIRECTOR AGENT
+        case 'generateCreativeConcept':
+        case 'playAmbientAudio':
+        case 'displayEmotionAndRespond':
+            agentName = DirectorAgent.name;
+            triggerHaptic('SUCCESS');
+            result = `[DIRECTOR] Creative task executed.`;
+            break;
+
+        // SENTINEL AGENT
+        case 'confirmBiometricIdentity':
+        case 'getSystemStatus':
+            agentName = SentinelAgent.name;
+            if (name === 'getSystemStatus') {
+                result = `[SENTINEL] DIAGNOSTICS: Online=${context.systemStatus.isOnline}, Secure=${context.systemStatus.securityStatus}`;
+            } else {
+                if (args.match) {
+                    triggerHaptic('SUCCESS');
+                    result = "ACCESS_GRANTED";
+                } else {
+                    triggerHaptic('FAILURE');
+                    result = "ACCESS_DENIED";
+                }
+            }
+            break;
+            
+        // SYSTEM AGENT
+        case 'createSystemSnapshot':
+            agentName = SystemAgent.name;
+            triggerHaptic('SUCCESS');
+            result = await SystemAgent.createSnapshot();
+            const blob = new Blob([result], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `issie_snapshot_${Date.now()}.json`; a.click();
+            result = "System Snapshot created and downloaded.";
+            break;
+        
+        case 'restoreSystemSnapshot':
+            agentName = SystemAgent.name;
+            result = "To restore a snapshot, please use the 'Restore System' button in the Control Panel.";
+            break;
+
+        case 'manageMission':
+            agentName = "MISSION_CONTROL";
+            triggerHaptic('SUCCESS');
+            result = "Mission updated.";
+            break;
+            
+        // COACH AGENT
+        case 'provideCoachingTip':
+            agentName = CoachAgent.name;
+            const severity = args.severity || 'neutral';
+            if (severity === 'critical') triggerHaptic('CRITICAL');
+            else if (severity === 'warning') triggerHaptic('FAILURE'); 
+            else triggerHaptic('SCAN'); 
+            
+            context.clientHooks.setCoachingTip({
+                text: args.tip,
+                severity: severity,
+                timestamp: Date.now()
+            });
+            result = "Tip delivered to user HUD.";
+            break;
+
+        default:
+            result = `Tool '${name}' executed.`;
+      }
+  } catch (e: any) {
+      status = 'FAILURE';
+      triggerHaptic('FAILURE');
+      result = `Error executing ${name}: ${e.message}`;
   }
+
+  await logAuditEntry(agentName, name, status, result.substring(0, 100));
+
+  return { result };
 };
